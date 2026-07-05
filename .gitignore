@@ -1,0 +1,30 @@
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Environment files
+.env
+.env.*
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Android
+.gradle/
+local.properties
+
+# Ignore Gradle distribution ZIP
+mobile/gradle/wrapper/*.zip

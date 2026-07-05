@@ -1,0 +1,20 @@
+{
+  "name": "ai-expense-tracker-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.2",
+    "dotenv": "^16.4.1",
+    "express": "^4.21.1",
+    "helmet": "^8.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.1.0",
+    "swagger-jsdoc": "^6.0.0",
+    "swagger-ui-express": "^5.0.1"
+  }
+}

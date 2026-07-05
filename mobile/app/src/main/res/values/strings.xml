@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">AI Expense Tracker</string>
+    <string name="welcome_title">Expense Tracker</string>
+    <string name="login_button">Connect</string>
+    <string name="permission_button">Grant SMS Permission</string>
+    <string name="sync_button">Sync Inbox Now</string>
+    <string name="status_default">Tap Connect to start SMS sync.</string>
+    <string name="status_connecting">Connecting to website...</string>
+    <string name="status_connected">Connected. New bank SMS will sync to the website.</string>
+    <string name="status_connect_failed">Connection failed. Check the PC IP and port 5000.</string>
+    <string name="status_permission_granted">SMS permission already granted</string>
+    <string name="status_sync_started">SMS inbox sync started</string>
+    <string name="status_synced">Transaction synced</string>
+    <string name="status_sync_failed">Sync failed</string>
+    <string name="status_offline">Offline; pending sync will be retried</string>
+</resources>
