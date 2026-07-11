@@ -108,7 +108,7 @@ app.post('/api/transactions', authMiddleware, async (req, res) => {
   try {
     const database = await connectDatabase();
     const categoryDoc = await database.collection('merchantCategories').findOne({ userId: req.user.userId, merchantName: merchant });
-    const category = categoryDoc?.category || categorizeMerchant(merchant);
+    const category = categoryDoc?.category || categorizeMerchant(merchant, sms, type);
 
     if (!categoryDoc) {
       await database.collection('merchantCategories').insertOne({ userId: req.user.userId, merchantName: merchant, category, createdAt: new Date() });
@@ -147,12 +147,12 @@ app.post('/api/transactions/direct', async (req, res) => {
 });
 
 app.get('/api/direct/transactions', async (req, res) => {
-  const { search = '', type = '', page = 1, limit = 20 } = req.query;
+  const { search = '', type = '', page = 1, limit = 20, month = '' } = req.query;
   const offset = (Number(page) - 1) * Number(limit);
 
   try {
     const user = await getOrCreateDirectUser(req.query.email, req.query.name);
-    const result = await getTransactionsForUser(user._id.toString(), { search, type, offset, limit: Number(limit) });
+    const result = await getTransactionsForUser(user._id.toString(), { search, type, offset, limit: Number(limit), month });
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -162,7 +162,7 @@ app.get('/api/direct/transactions', async (req, res) => {
 app.get('/api/direct/insights', async (req, res) => {
   try {
     const user = await getOrCreateDirectUser(req.query.email, req.query.name);
-    res.json(await buildInsightsForUser(user._id.toString()));
+    res.json(await buildInsightsForUser(user._id.toString(), req.query.month));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -172,7 +172,7 @@ app.get('/api/direct/budgets', async (req, res) => {
   try {
     const user = await getOrCreateDirectUser(req.query.email, req.query.name);
     const database = await connectDatabase();
-    const result = await database.collection('budgets').find({ userId: user._id.toString() }).sort({ createdAt: -1 }).toArray();
+    const result = await database.collection('budgets').find({ userId: { $in: getUserIdVariants(user._id.toString()) } }).sort({ createdAt: -1 }).toArray();
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -188,8 +188,33 @@ app.post('/api/direct/chat', async (req, res) => {
   try {
     const user = await getOrCreateDirectUser(req.body.email, req.body.name);
     const database = await connectDatabase();
-    const transactions = await database.collection('transactions').find({ userId: user._id.toString() }).sort({ date: -1, createdAt: -1 }).limit(20).toArray();
-    res.json({ answer: generateChatReply(message, transactions) });
+    const { startOfMonth, endOfMonth } = getMonthDateRange(req.body.month);
+    const userIdQuery = buildUserIdQuery(user._id.toString());
+    
+    const [transactions, budgets, allTransactions] = await Promise.all([
+      database.collection('transactions').find({ ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } }).sort({ date: -1, createdAt: -1 }).limit(100).toArray(),
+      database.collection('budgets').find({ userId: { $in: getUserIdVariants(user._id.toString()) } }).toArray(),
+      database.collection('transactions').find({ ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } }).toArray()
+    ]);
+    
+    // Calculate total spending and categories
+    const totalSpending = allTransactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + Number(t.amount), 0);
+    const categories = {};
+    allTransactions.filter(t => t.type === 'debit').forEach(t => {
+      categories[t.category] = (categories[t.category] || 0) + Number(t.amount);
+    });
+    const categoryArray = Object.entries(categories).map(([cat, total]) => ({ category: cat, total }));
+    
+    const answer = await generateAssistantReply({
+      message,
+      month: req.body.month,
+      transactions,
+      budgets,
+      totalSpending,
+      categories: categoryArray,
+      userName: user.name
+    });
+    res.json({ answer });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -206,11 +231,11 @@ app.delete('/api/direct/history', async (req, res) => {
 });
 
 app.get('/api/transactions', authMiddleware, async (req, res) => {
-  const { search = '', type = '', page = 1, limit = 20 } = req.query;
+  const { search = '', type = '', page = 1, limit = 20, month = '' } = req.query;
   const offset = (Number(page) - 1) * Number(limit);
 
   try {
-    res.json(await getTransactionsForUser(req.user.userId, { search, type, offset, limit: Number(limit) }));
+    res.json(await getTransactionsForUser(req.user.userId, { search, type, offset, limit: Number(limit), month }));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -218,7 +243,7 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 
 app.get('/api/insights', authMiddleware, async (req, res) => {
   try {
-    res.json(await buildInsightsForUser(req.user.userId));
+    res.json(await buildInsightsForUser(req.user.userId, req.query.month));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -257,21 +282,63 @@ app.post('/api/chat', authMiddleware, async (req, res) => {
 
   try {
     const database = await connectDatabase();
-    const transactions = await database.collection('transactions').find({ userId: req.user.userId }).sort({ date: -1 }).limit(20).toArray();
-    const answer = generateChatReply(message, transactions);
+    const { startOfMonth, endOfMonth } = getMonthDateRange(req.body.month);
+    const userIdQuery = buildUserIdQuery(req.user.userId);
+    
+    const [transactions, budgets, allTransactions] = await Promise.all([
+      database.collection('transactions').find({ ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } }).sort({ date: -1 }).limit(100).toArray(),
+      database.collection('budgets').find({ userId: { $in: getUserIdVariants(req.user.userId) } }).toArray(),
+      database.collection('transactions').find({ ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } }).toArray()
+    ]);
+    
+    // Calculate total spending and categories
+    const totalSpending = allTransactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + Number(t.amount), 0);
+    const categories = {};
+    allTransactions.filter(t => t.type === 'debit').forEach(t => {
+      categories[t.category] = (categories[t.category] || 0) + Number(t.amount);
+    });
+    const categoryArray = Object.entries(categories).map(([cat, total]) => ({ category: cat, total }));
+    
+    const answer = await generateAssistantReply({
+      message,
+      month: req.body.month,
+      transactions,
+      budgets,
+      totalSpending,
+      categories: categoryArray
+    });
     res.json({ answer });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-function categorizeMerchant(merchant) {
-  const lowered = merchant.toLowerCase();
-  if (lowered.includes('swiggy') || lowered.includes('zomato') || lowered.includes('food')) return 'Food';
-  if (lowered.includes('uber') || lowered.includes('ola') || lowered.includes('metro')) return 'Transport';
-  if (lowered.includes('amazon') || lowered.includes('flipkart')) return 'Shopping';
-  if (lowered.includes('rent') || lowered.includes('electric') || lowered.includes('bill')) return 'Bills';
-  return 'Other';
+function categorizeMerchant(merchant = '', sms = '', type = '') {
+  const lowered = `${merchant} ${sms}`.toLowerCase();
+
+  if (/(salary|credited by employer|interest credited|refund|cashback|investment|mutual fund|sip|deposit|fd|loan emi|emi|insurance|credit card|finance|bank|wallet)/.test(lowered)) {
+    return type === 'credit' ? 'Income' : 'Finance';
+  }
+  if (/(swiggy|zomato|restaurant|cafe|coffee|pizza|burger|biryani|eatery|food|dining)/.test(lowered)) {
+    return 'Food';
+  }
+  if (/(dmart|bigbasket|blinkit|zepto|jiomart|grocery|supermarket|mart|fresh|grocers|reliance fresh)/.test(lowered)) {
+    return 'Groceries';
+  }
+  if (/(uber|ola|rapido|metro|irctc|fuel|petrol|diesel|transport|bus|train|cab|fastag)/.test(lowered)) {
+    return 'Transport';
+  }
+  if (/(amazon|flipkart|myntra|meesho|ajio|shopping|store|retail)/.test(lowered)) {
+    return 'Shopping';
+  }
+  if (/(rent|electric|water|gas|broadband|wifi|recharge|postpaid|bill|utility|subscription|netflix|spotify|prime)/.test(lowered)) {
+    return 'Bills';
+  }
+  if (/(movie|bookmyshow|game|gaming|entertainment|hotstar|sony liv)/.test(lowered)) {
+    return 'Entertainment';
+  }
+
+  return type === 'credit' ? 'Income' : 'Other';
 }
 
 async function getOrCreateDirectUser(email, name, googleId = null) {
@@ -298,12 +365,29 @@ function publicUser(user) {
   return { id: user._id.toString(), email: user.email, name: user.name };
 }
 
+function getUserIdVariants(userId) {
+  if (userId instanceof ObjectId) {
+    return [userId, userId.toString()];
+  }
+
+  if (typeof userId === 'string' && ObjectId.isValid(userId)) {
+    return [userId, new ObjectId(userId)];
+  }
+
+  return [userId];
+}
+
+function buildUserIdQuery(userId) {
+  return { userId: { $in: getUserIdVariants(userId) } };
+}
+
 async function clearHistoryForUser(userId) {
   const database = await connectDatabase();
+  const userIdQuery = buildUserIdQuery(userId);
   const [transactions, merchantCategories, budgets] = await Promise.all([
-    database.collection('transactions').deleteMany({ userId }),
-    database.collection('merchantCategories').deleteMany({ userId }),
-    database.collection('budgets').deleteMany({ userId })
+    database.collection('transactions').deleteMany(userIdQuery),
+    database.collection('merchantCategories').deleteMany({ userId: { $in: getUserIdVariants(userId) } }),
+    database.collection('budgets').deleteMany({ userId: { $in: getUserIdVariants(userId) } })
   ]);
 
   return {
@@ -316,13 +400,14 @@ async function clearHistoryForUser(userId) {
 async function saveTransactionForUser(userId, { amount, merchant, type, date, sms }) {
   const database = await connectDatabase();
   const normalizedMerchant = merchant || 'Unknown';
-  const existing = await database.collection('transactions').findOne({ userId, rawSms: sms });
+  const userIdQuery = buildUserIdQuery(userId);
+  const existing = await database.collection('transactions').findOne({ ...userIdQuery, rawSms: sms });
   if (existing) {
     return { ...formatTransaction(existing), duplicate: true };
   }
 
-  const categoryDoc = await database.collection('merchantCategories').findOne({ userId, merchantName: normalizedMerchant });
-  const category = categoryDoc?.category || categorizeMerchant(normalizedMerchant);
+  const categoryDoc = await database.collection('merchantCategories').findOne({ userId: { $in: getUserIdVariants(userId) }, merchantName: normalizedMerchant });
+  const category = categoryDoc?.category || categorizeMerchant(normalizedMerchant, sms, type);
 
   if (!categoryDoc) {
     await database.collection('merchantCategories').insertOne({ userId, merchantName: normalizedMerchant, category, createdAt: new Date() });
@@ -343,9 +428,19 @@ async function saveTransactionForUser(userId, { amount, merchant, type, date, sm
   return { ...transaction, id: inserted.insertedId.toString(), duplicate: false };
 }
 
-async function getTransactionsForUser(userId, { search = '', type = '', offset = 0, limit = 20 } = {}) {
+function getMonthDateRange(month) {
+  const normalizedMonth = /^\d{4}-\d{2}$/.test(month || '') ? month : new Date().toISOString().slice(0, 7);
+  const [year, monthNumber] = normalizedMonth.split('-').map(Number);
+  const startOfMonth = `${normalizedMonth}-01`;
+  const endOfMonth = new Date(year, monthNumber, 0).toISOString().split('T')[0];
+  return { normalizedMonth, startOfMonth, endOfMonth };
+}
+
+async function getTransactionsForUser(userId, { search = '', type = '', offset = 0, limit = 20, month = '' } = {}) {
   const database = await connectDatabase();
-  const query = { userId };
+  const { normalizedMonth, startOfMonth, endOfMonth } = getMonthDateRange(month);
+  const userIdQuery = buildUserIdQuery(userId);
+  const query = { ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } };
   if (search) query.merchant = { $regex: search, $options: 'i' };
   if (type) query.type = type;
 
@@ -356,26 +451,66 @@ async function getTransactionsForUser(userId, { search = '', type = '', offset =
     .limit(Number(limit))
     .toArray();
 
-  const total = await database.collection('transactions').countDocuments(query);
-  return { items: items.map(formatTransaction), total };
+  const [total, monthRows] = await Promise.all([
+    database.collection('transactions').countDocuments(query),
+    database.collection('transactions').aggregate([
+      { $match: { ...userIdQuery, date: { $type: 'string' } } },
+      { $project: { month: { $substr: ['$date', 0, 7] } } },
+      { $group: { _id: '$month' } },
+      { $sort: { _id: -1 } }
+    ]).toArray()
+  ]);
+
+  return {
+    items: items.map(formatTransaction),
+    total,
+    selectedMonth: normalizedMonth,
+    availableMonths: monthRows.map((row) => row._id).filter(Boolean)
+  };
 }
 
-async function buildInsightsForUser(userId) {
+async function buildInsightsForUser(userId, month = '') {
   const database = await connectDatabase();
-  const transactions = await database.collection('transactions').find({ userId }).toArray();
+  const { normalizedMonth, startOfMonth, endOfMonth } = getMonthDateRange(month);
+  const userIdQuery = buildUserIdQuery(userId);
+
+  const [transactions, allTransactions] = await Promise.all([
+    database.collection('transactions')
+      .find({ ...userIdQuery, date: { $gte: startOfMonth, $lte: endOfMonth } })
+      .toArray(),
+    database.collection('transactions')
+      .find({ ...userIdQuery, date: { $type: 'string' } })
+      .sort({ date: 1, createdAt: 1 })
+      .toArray()
+  ]);
+    
   const totalExpense = transactions.filter((item) => item.type === 'debit').reduce((sum, item) => sum + Number(item.amount), 0);
   const totalIncome = transactions.filter((item) => item.type === 'credit').reduce((sum, item) => sum + Number(item.amount), 0);
-  const monthlySpending = transactions.filter((item) => item.type === 'debit' && new Date(item.date) >= new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).reduce((sum, item) => sum + Number(item.amount), 0);
+  const monthlySpending = totalExpense;
   const largestExpense = transactions.filter((item) => item.type === 'debit').sort((a, b) => Number(b.amount) - Number(a.amount))[0] || null;
 
-  const monthlyTrend = Object.entries(transactions.reduce((acc, item) => {
+  const monthlyTrend = Object.entries(allTransactions.reduce((acc, item) => {
     const month = item.date.slice(0, 7);
     acc[month] = (acc[month] || 0) + (item.type === 'debit' ? Number(item.amount) : 0);
     return acc;
   }, {})).map(([month, expense]) => ({ month, expense })).slice(-6);
 
+  const dailyTrend = Object.values(transactions.reduce((acc, item) => {
+    const day = item.date.slice(8, 10);
+    if (!acc[day]) {
+      acc[day] = { day, expense: 0, income: 0 };
+    }
+    if (item.type === 'debit') {
+      acc[day].expense += Number(item.amount);
+    } else {
+      acc[day].income += Number(item.amount);
+    }
+    return acc;
+  }, {})).sort((a, b) => Number(a.day) - Number(b.day));
+
   const categories = transactions.filter((item) => item.type === 'debit').reduce((acc, item) => {
-    acc[item.category] = (acc[item.category] || 0) + Number(item.amount);
+    const category = categorizeMerchant(item.merchant, item.rawSms, item.type);
+    acc[category] = (acc[category] || 0) + Number(item.amount);
     return acc;
   }, {});
 
@@ -384,9 +519,10 @@ async function buildInsightsForUser(userId) {
   const savingsSuggestion = computeSavingsSuggestion({ monthly_spending: monthlySpending });
 
   return {
-    summary: { total_expense: totalExpense, total_income: totalIncome, monthly_spending: monthlySpending },
+    summary: { total_expense: totalExpense, total_income: totalIncome, monthly_spending: monthlySpending, month: normalizedMonth },
     largestExpense: largestExpense ? { merchant: largestExpense.merchant, amount: largestExpense.amount } : null,
     monthlyTrend,
+    dailyTrend,
     categories: categoryRows,
     prediction,
     savingsSuggestion
@@ -394,7 +530,102 @@ async function buildInsightsForUser(userId) {
 }
 
 function formatTransaction(item) {
-  return { ...item, id: item._id?.toString?.() || item.id };
+  return {
+    ...item,
+    category: categorizeMerchant(item.merchant, item.rawSms, item.type),
+    id: item._id?.toString?.() || item.id
+  };
+}
+
+async function generateAssistantReply({ message, month, transactions, budgets, totalSpending, categories, userName = 'User' }) {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) {
+    return generateChatReply(message, transactions, budgets, totalSpending, categories);
+  }
+
+  try {
+    return await callGeminiAssistant({
+      apiKey: geminiApiKey,
+      message,
+      month,
+      transactions,
+      budgets,
+      totalSpending,
+      categories,
+      userName
+    });
+  } catch (error) {
+    console.error('Gemini request failed, using local fallback:', error.message);
+    return generateChatReply(message, transactions, budgets, totalSpending, categories);
+  }
+}
+
+async function callGeminiAssistant({ apiKey, message, month, transactions, budgets, totalSpending, categories, userName }) {
+  const monthLabel = month && /^\d{4}-\d{2}$/.test(month)
+    ? new Date(`${month}-01`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    : 'the selected month';
+
+  const recentTransactions = transactions.slice(0, 25).map((tx) => ({
+    merchant: tx.merchant,
+    amount: Number(tx.amount),
+    type: tx.type,
+    category: categorizeMerchant(tx.merchant, tx.rawSms, tx.type),
+    date: tx.date
+  }));
+
+  const promptContext = {
+    user: userName,
+    selectedMonth: month || null,
+    selectedMonthLabel: monthLabel,
+    summary: {
+      totalSpending: Number(totalSpending || 0),
+      totalTransactions: transactions.length,
+      debitTransactions: transactions.filter((tx) => tx.type === 'debit').length,
+      creditTransactions: transactions.filter((tx) => tx.type === 'credit').length
+    },
+    budgets,
+    categoryTotals: categories,
+    recentTransactions
+  };
+
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey
+    },
+    body: JSON.stringify({
+      model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
+      system_instruction: 'You are a personal finance assistant for an expense tracker. Answer only using the provided budget and transaction data. Be concise, practical, and specific. If asked to summarize a budget, clearly mention overspending risk, top categories, and simple next steps.',
+      generation_config: {
+        temperature: 0.4,
+        thinking_level: 'low'
+      },
+      input: `User question: ${message}\n\nFinance data:\n${JSON.stringify(promptContext, null, 2)}`
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  return extractGeminiText(data) || 'I could not generate a response from Gemini right now.';
+}
+
+function extractGeminiText(data) {
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  const textBlocks = (data?.steps || [])
+    .flatMap((step) => step?.content || [])
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text.trim())
+    .filter(Boolean);
+
+  return textBlocks.join('\n\n').trim();
 }
 
 function computePrediction(monthlyTrend = []) {
@@ -415,20 +646,93 @@ function computeSavingsSuggestion(summary = {}) {
   return 'You are managing spend well. Keep tracking daily.';
 }
 
-function generateChatReply(message, transactions) {
+function generateChatReply(message, transactions, budgets = [], totalSpending = 0, categories = []) {
   const lowered = message.toLowerCase();
-  if (lowered.includes('most this month')) {
-    const top = transactions.reduce((acc, item) => acc.amount > item.amount ? acc : item, { amount: 0, merchant: 'None' });
-    return `You spent the most on ${top.merchant || 'your recent purchases'} this month.`;
+  
+  // Budget-related queries
+  if (lowered.includes('budget')) {
+    if (!budgets || budgets.length === 0) {
+      return 'You don\'t have any budgets set yet. Set budget limits for each category to track your spending better.';
+    }
+    const budgetSummary = budgets.map(b => {
+      const spent = transactions.filter(t => t.category === b.category).reduce((sum, t) => sum + Number(t.amount), 0);
+      const percentage = Math.round((spent / b.monthlyLimit) * 100);
+      const status = percentage > 100 ? '⚠️ Over budget' : percentage > 80 ? '⚠️ Almost there' : '✅ On track';
+      return `${b.category}: ${spent.toFixed(0)} / ${b.monthlyLimit} (${percentage}%) ${status}`;
+    }).join('. ');
+    return `Budget status: ${budgetSummary}`;
   }
-  if (lowered.includes('food') && lowered.includes('week')) {
-    const weekSpend = transactions.filter((item) => item.merchant.toLowerCase().includes('food') || item.merchant.toLowerCase().includes('swiggy') || item.merchant.toLowerCase().includes('zomato'));
-    return `You logged ${weekSpend.length} food-related transactions recently.`;
+  
+  // Spending trend queries
+  if (lowered.includes('spend') || lowered.includes('spent')) {
+    if (lowered.includes('most')) {
+      const categorySpending = {};
+      transactions.forEach(tx => {
+        categorySpending[tx.category] = (categorySpending[tx.category] || 0) + Number(tx.amount);
+      });
+      const topCategory = Object.entries(categorySpending).sort((a, b) => b[1] - a[1])[0];
+      if (topCategory) {
+        return `You spend the most on ${topCategory[0]}: INR ${topCategory[1].toFixed(2)}. Consider optimizing this category.`;
+      }
+    }
+    if (lowered.includes('food')) {
+      const foodSpend = transactions.filter(t => t.category === 'Food').reduce((sum, t) => sum + Number(t.amount), 0);
+      const foodCount = transactions.filter(t => t.category === 'Food').length;
+      return `Food spending: INR ${foodSpend.toFixed(2)} across ${foodCount} transactions. This is your ${categories?.sort((a, b) => b.total - a.total).findIndex(c => c.category === 'Food') === 0 ? 'top' : 'major'} expense category.`;
+    }
+    if (lowered.includes('category')) {
+      const top3 = categories?.sort((a, b) => b.total - a.total).slice(0, 3) || [];
+      return `Your top spending categories: ${top3.map(c => `${c.category} (INR ${c.total.toFixed(2)})`).join(', ')}`;
+    }
   }
-  if (lowered.includes('yesterday')) {
-    return `You have ${transactions.length} recent debit transactions; review them in the transactions page.`;
+  
+  // Savings queries
+  if (lowered.includes('save') || lowered.includes('saving')) {
+    if (totalSpending > 30000) {
+      return 'Your monthly spending is quite high (INR ' + totalSpending.toFixed(0) + '). Try reducing discretionary purchases like food delivery and entertainment.';
+    }
+    if (totalSpending > 15000) {
+      return 'Your spending is moderate at INR ' + totalSpending.toFixed(0) + ' monthly. You could save more by cutting one major category by 10-15%.';
+    }
+    return 'Your spending is well-managed at INR ' + totalSpending.toFixed(0) + ' monthly. Keep maintaining this habit!';
   }
-  return 'I can summarize your recent spending, categories, and predictions from your transaction history.';
+  
+  // Prediction queries
+  if (lowered.includes('predict') || lowered.includes('next month') || lowered.includes('forecast')) {
+    const avgMonthlySpend = transactions.length > 0 ? transactions.reduce((sum, t) => sum + Number(t.amount), 0) / Math.max(1, transactions.length) * 30 : 0;
+    return `Based on your current spending pattern, your next month might cost around INR ${avgMonthlySpend.toFixed(0)}. Monitor your daily transactions to stay within budget.`;
+  }
+  
+  // Merchant queries
+  if (lowered.includes('merchant') || lowered.includes('where')) {
+    const merchantSpending = {};
+    transactions.forEach(tx => {
+      merchantSpending[tx.merchant] = (merchantSpending[tx.merchant] || 0) + Number(tx.amount);
+    });
+    const topMerchant = Object.entries(merchantSpending).sort((a, b) => b[1] - a[1])[0];
+    if (topMerchant) {
+      return `You spend the most at ${topMerchant[0]}: INR ${topMerchant[1].toFixed(2)}.`;
+    }
+  }
+  
+  // General queries
+  if (lowered.includes('recent') || lowered.includes('latest')) {
+    if (transactions.length === 0) return 'No recent transactions found. Start by receiving SMS from your bank.';
+    const recent = transactions.slice(0, 3);
+    return `Your recent transactions: ${recent.map(t => `${t.merchant} - INR ${t.amount} (${t.category})`).join('; ')}`;
+  }
+  
+  if (lowered.includes('total') || lowered.includes('all')) {
+    const total = transactions.reduce((sum, t) => sum + Number(t.amount), 0);
+    const debitCount = transactions.filter(t => t.type === 'debit').length;
+    return `Total transactions: ${transactions.length}. Total amount: INR ${total.toFixed(2)} with ${debitCount} debits. Your average transaction is INR ${(total / Math.max(1, transactions.length)).toFixed(2)}.`;
+  }
+  
+  // Default response
+  if (transactions.length === 0) {
+    return 'No transaction data yet. Ask about: spending, budget, categories, savings, predictions, or recent transactions once you have data.';
+  }
+  return 'I can answer questions about: spending trends, budget status, category analysis, savings opportunities, monthly predictions, or your recent transactions. What would you like to know?';
 }
 
 export default app;

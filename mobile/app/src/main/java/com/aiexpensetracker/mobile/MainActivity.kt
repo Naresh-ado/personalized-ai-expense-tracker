@@ -152,6 +152,7 @@ class MainActivity : AppCompatActivity() {
                 if (response.isSuccessful) {
                     prefs.edit()
                         .putString(PREF_SERVER_HOST, host)
+                        .putLong("last_sms_sync_time", 0L)
                         .putBoolean(PREF_CONNECTED, true)
                         .apply()
                     binding.serverHostInput.setText(host)

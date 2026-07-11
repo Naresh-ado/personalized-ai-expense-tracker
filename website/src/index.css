@@ -4,12 +4,14 @@
 
 :root {
   color-scheme: dark;
-  font-family: Inter, system-ui, sans-serif;
+  font-family: "Segoe UI", system-ui, sans-serif;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: #0f172a;
-  color: #f8fafc;
+  background:
+    radial-gradient(circle at top, rgba(63, 63, 70, 0.22), transparent 40%),
+    linear-gradient(180deg, #000000 0%, #09090b 55%, #111111 100%);
+  color: #f4f4f5;
 }
